@@ -1,0 +1,14 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "environmentName": { "value": "dev" },
+    "prefix": { "value": "sourcecheck" },
+    "dataRegion": { "value": "eu" },
+    "postgresAdminLogin": { "value": "sourcecheckadmin" },
+    "analyzerBackend": { "value": "rules" },
+    "storageBackend": { "value": "azure" },
+    "allowedOrigin": { "value": "http://localhost:5173" },
+    "containerImage": { "value": "mcr.microsoft.com/azuredocs/containerapps-helloworld:latest" }
+  }
+}

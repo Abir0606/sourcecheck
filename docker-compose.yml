@@ -1,0 +1,94 @@
+name: sourcecheck
+
+services:
+  db:
+    # pgvector-enabled Postgres. Mirrors Azure Database for PostgreSQL Flexible Server,
+    # which supports the `vector` extension (availability must be verified per region).
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-sourcecheck}
+      POSTGRES_USER: ${POSTGRES_USER:-sourcecheck}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sourcecheck}
+    ports:
+      # Host port 5433 avoids clashing with a local PostgreSQL on 5432.
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sourcecheck} -d ${POSTGRES_DB:-sourcecheck}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build:
+      context: ./backend
+    command: python manage.py runserver 0.0.0.0:8000
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-sourcecheck}:${POSTGRES_PASSWORD:-sourcecheck}@db:5432/${POSTGRES_DB:-sourcecheck}
+      POSTGRES_HOST: db
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1,api
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+      - local_storage:/app/local_storage
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: ./backend
+    command: celery -A config worker -l info
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-sourcecheck}:${POSTGRES_PASSWORD:-sourcecheck}@db:5432/${POSTGRES_DB:-sourcecheck}
+      POSTGRES_HOST: db
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+    volumes:
+      - ./backend:/app
+      - local_storage:/app/local_storage
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  beat:
+    build:
+      context: ./backend
+    command: celery -A config beat -l info
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-sourcecheck}:${POSTGRES_PASSWORD:-sourcecheck}@db:5432/${POSTGRES_DB:-sourcecheck}
+      POSTGRES_HOST: db
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+    volumes:
+      - ./backend:/app
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  local_storage:

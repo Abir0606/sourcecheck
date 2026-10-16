@@ -1,0 +1,78 @@
+name: Deploy (Azure Container Apps)
+
+# Builds the backend image, pushes it to Azure Container Registry, runs database
+# migrations via a Container Apps job, then rolls the image out to web/worker/beat.
+#
+# Prerequisite (one-time): provision infra with `azd provision` and set these
+# repo variables/secrets. Authentication uses GitHub OIDC (no stored password):
+#   vars.AZURE_CLIENT_ID, vars.AZURE_TENANT_ID, vars.AZURE_SUBSCRIPTION_ID
+#   vars.AZURE_RESOURCE_GROUP, vars.RESOURCE_PREFIX (e.g. sourcecheck-dev)
+#   vars.ACR_NAME
+# The federated credential in Entra ID must trust this repo + environment.
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        type: choice
+        options: [dev, staging, prod]
+        default: dev
+  push:
+    branches: [main]
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment || 'dev' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Build and push image
+        run: |
+          az acr login -n "${{ vars.ACR_NAME }}"
+          IMAGE="${{ vars.ACR_NAME }}.azurecr.io/sourcecheck:${{ env.IMAGE_TAG }}"
+          docker build -t "$IMAGE" -f backend/Dockerfile backend
+          docker push "$IMAGE"
+          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
+
+      - name: Run database migrations
+        run: |
+          RG="${{ vars.AZURE_RESOURCE_GROUP }}"
+          JOB="${{ vars.RESOURCE_PREFIX }}-migrate"
+          # Point the job at the new image and run it once.
+          az containerapp job update -g "$RG" -n "$JOB" --image "$IMAGE"
+          az containerapp job start -g "$RG" -n "$JOB"
+
+      - name: Roll out to web, worker and beat
+        run: |
+          RG="${{ vars.AZURE_RESOURCE_GROUP }}"
+          P="${{ vars.RESOURCE_PREFIX }}"
+          for APP in web worker beat; do
+            az containerapp update -g "$RG" -n "${P}-${APP}" --image "$IMAGE"
+          done
+
+      - name: Smoke test (health)
+        run: |
+          RG="${{ vars.AZURE_RESOURCE_GROUP }}"
+          FQDN=$(az containerapp show -g "$RG" -n "${{ vars.RESOURCE_PREFIX }}-web" \
+            --query "properties.configuration.ingress.fqdn" -o tsv)
+          echo "Web FQDN: $FQDN"
+          for i in $(seq 1 20); do
+            if curl -fsS "https://$FQDN/healthz"; then echo " OK"; exit 0; fi
+            sleep 15
+          done
+          echo "health check failed"; exit 1
